@@ -1,4 +1,4 @@
-const CACHE='home-atelier-planner-v2';
+const CACHE='home-atelier-planner-v3';
 const ASSETS=['./','./index.html','./manifest.webmanifest','./icon-180.png','./brand-mark.svg','./icon-192.png','./icon-512.png'];
 const known=new Set(ASSETS.map(name=>new URL(name,self.registration.scope).href));
 self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(ASSETS)).then(()=>self.skipWaiting())));

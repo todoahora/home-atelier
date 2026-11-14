@@ -2,10 +2,10 @@ import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.5.0/firebas
 import {
   getAuth, onAuthStateChanged, createUserWithEmailAndPassword,
   signInWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification,
-  reload, signOut,
+  reload, signOut, deleteUser,
 } from 'https://www.gstatic.com/firebasejs/12.5.0/firebase-auth.js';
 import {
-  getFirestore, doc, getDocFromServer, onSnapshot, runTransaction,
+  getFirestore, doc, getDocFromServer, onSnapshot, runTransaction, deleteDoc,
 } from 'https://www.gstatic.com/firebasejs/12.5.0/firebase-firestore.js';
 import config from './firebase-config.js';
 
@@ -20,6 +20,7 @@ const messages = {
   'auth/invalid-email': 'Enter a valid email address.',
   'auth/too-many-requests': 'Too many attempts. Try again later.',
   'auth/operation-not-allowed': 'Email sign-in is unavailable. Try again later.',
+  'auth/requires-recent-login': 'For your security, sign out, sign in again and repeat this step.',
   'auth/network-request-failed': 'Check your internet connection and try again.',
   'permission-denied': 'Access denied. Check the workspace code and the invited email address.',
   'unavailable': 'Firebase is temporarily unreachable. Check your connection.',
@@ -28,6 +29,7 @@ const workspaceId = /^[\w-]{1,128}$/;
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const workspace = id => doc(firestore, 'workspaces', id);
 const email = value => value.trim().toLowerCase();
+const accessPattern = /^[A-Z]{2}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
 
 export function installCloud(bridge) {
   const launcher = document.querySelector('#atelier-cloud-open');
@@ -40,6 +42,11 @@ export function installCloud(bridge) {
   const details = panel.querySelector('#atelier-workspace');
   const code = panel.querySelector('#atelier-code');
   const invite = forms['atelier-invite'].elements.email;
+  const accessBox = panel.querySelector('#atelier-access-box');
+  const accessInput = panel.querySelector('#atelier-access');
+  const accessKey = bridge.key + '.access-code';
+  try { accessInput.value = localStorage.getItem(accessKey) || ''; } catch {}
+  const accessCode = () => accessInput.value.trim().toUpperCase();
   let user, active, localCopy, disconnect, opening = 0, busy = false, message = '';
 
   function draftKey(context) {
@@ -101,6 +108,9 @@ export function installCloud(bridge) {
     controls['atelier-signout'].hidden = !signedIn;
     controls['atelier-open-own'].hidden = !verified || Boolean(active);
     controls['atelier-import-own'].hidden = !verified || Boolean(active);
+    accessBox.hidden = Boolean(active);
+    controls['atelier-delete-workspace'].hidden = !active?.owner;
+    controls['atelier-delete-account'].hidden = !signedIn || Boolean(active);
     controls['atelier-leave'].hidden = !active;
     controls['atelier-retry'].hidden = !active?.pending || active.conflict;
     controls['atelier-export-draft'].hidden = !active?.pending;
@@ -185,12 +195,21 @@ export function installCloud(bridge) {
     if (create) {
       const payload = copy ? bridge.read() : bridge.empty();
       checkSize(payload);
-      const created = await runTransaction(firestore, async tx => {
-        const prior = await tx.get(ref);
-        if (prior.exists()) return false;
-        tx.set(ref, { payload, inviteEmail: '', revision: 0 });
-        return true;
-      });
+      const access = accessCode();
+      let created;
+      try {
+        created = await runTransaction(firestore, async tx => {
+          const prior = await tx.get(ref);
+          if (prior.exists()) return false;
+          if (!accessPattern.test(access)) throw problem('Enter the access code from your Download & Access PDF.');
+          tx.set(ref, { payload, inviteEmail: '', revision: 0, access });
+          return true;
+        });
+      } catch (error) {
+        if (error.code === 'permission-denied') throw problem('This access code is not valid. Copy it from your Download & Access PDF.');
+        throw error;
+      }
+      if (created) { try { localStorage.setItem(accessKey, access); } catch {} }
       if (copy && !created) throw problem('A workspace already exists. Open it and use Import JSON if you want to restore a backup.');
     }
     const snapshot = await getDocFromServer(ref);
@@ -323,6 +342,8 @@ export function installCloud(bridge) {
         }
         setMessage('If an account exists, a password reset email has been sent.');
       } else if (method === 'register') {
+        if (accessCode() && !accessPattern.test(accessCode())) throw problem('Check the access code format, for example AB-1234-5678.');
+        try { if (accessCode()) localStorage.setItem(accessKey, accessCode()); } catch {}
         const result = await createUserWithEmailAndPassword(auth, address, password);
         await sendEmailVerification(result.user);
         setMessage('Check your inbox for the verification email.');
@@ -374,6 +395,26 @@ export function installCloud(bridge) {
     workspacePreference(active.uid, null);
     closeWorkspace();
     setMessage('You are viewing your local planner.');
+  });
+  controls['atelier-delete-workspace'].onclick = () => action(async () => {
+    const context = active;
+    if (!context?.owner) return;
+    if (!window.confirm('Delete this cloud workspace for you and the invited person? The planner on this device keeps its local copy. This cannot be undone.')) return;
+    await deleteDoc(context.ref);
+    workspacePreference(context.uid, null);
+    try { localStorage.removeItem(draftKey(context)); } catch {}
+    closeWorkspace();
+    setMessage('Cloud workspace deleted. Your local planner is unchanged.');
+  });
+  controls['atelier-delete-account'].onclick = () => action(async () => {
+    if (!user) return;
+    if (!window.confirm('Delete your account and your cloud workspace? Records saved only in this browser stay here. This cannot be undone.')) return;
+    if (user.emailVerified) {
+      try { await deleteDoc(workspace(user.uid)); } catch (error) { if (error.code !== 'permission-denied') throw error; }
+    }
+    workspacePreference(user.uid, null);
+    await deleteUser(user);
+    setMessage('Your account and cloud data were deleted.');
   });
   controls['atelier-retry'].onclick = () => flush(active);
   controls['atelier-export-draft'].onclick = downloadDraft;
